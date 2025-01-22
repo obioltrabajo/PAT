@@ -1,0 +1,418 @@
+import difflib
+import mysql.connector
+import Levenshtein as d
+import argparse
+import whisper
+from allosaurus.app import read_recognizer
+from allosaurus.model import get_all_models, resolve_model_name
+from allosaurus.bin.download_model import download_model
+from utils import utils
+import nltk
+nltk.download('punkt')  # Download the necessary data (if not already downloaded)
+from nltk.tokenize import SyllableTokenizer
+import phonemizer
+from phonemizer import phonemize
+
+tokenizer = SyllableTokenizer()
+
+def textHTML(dicho,era):
+    era = era.replace(" ","")
+    dicho = dicho.replace(" ","")
+    d = difflib.Differ()
+    diff = d.compare(dicho.replace("  "," "), era)
+    diferencias='\n'.join(diff)
+
+    cadena_suma = ""
+    cadena_resta = ""
+    cadena_letras_suma = ""
+    cadena_letras_resta = ""
+
+    for linea in diferencias.split("\n"):
+        if linea.startswith("-"):
+            cadena_resta += linea[0]
+            cadena_letras_resta += linea[2] 
+        elif linea.startswith("+"):
+            cadena_suma += linea[0]
+            cadena_letras_suma += linea[2]
+        else:
+            cadena_suma += " "
+            cadena_resta += " "
+            cadena_letras_suma += linea[2]
+            cadena_letras_resta += linea[2]
+
+    nueva_cad=""
+    i=0
+    fonemas_erroneos = ""
+    
+    for cc in cadena_letras_resta:
+        if (cadena_resta[i] == "-"):
+            nueva_cad += "*"
+            fonemas_erroneos += cc
+            #i+=1
+        else:
+            nueva_cad += cc
+
+        i += 1
+    
+    return nueva_cad,fonemas_erroneos
+
+def alin(new,era):
+    d = difflib.Differ()
+    diff = d.compare(new, era)
+    diferencias='\n'.join(diff)
+
+    cadena_letras_suma = ""
+    cadena_letras_resta = ""
+
+    act = 0       
+    listas = []   
+    listas2 = []
+
+    cadd  = ""
+    cadd2 = ""
+    aux=0
+    for signos in diferencias.split("\n"):
+        if (signos[0] != " "):
+            if(act == 0):
+                cadd += signos[0]
+                cadd2 += signos[2]
+                act = 1
+            else:
+                cadd += signos[0]
+                cadd2 += signos[2]
+
+        else:
+            if (act == 1):
+                listas.append(cadd)
+                listas2.append(cadd2)
+                cadd = ""
+                cadd2 = ""
+            act = 0
+
+    if (cadd != ""):
+        listas.append(cadd)
+        listas2.append(cadd2)
+
+    cad_valid = ""
+
+    it = 0
+
+    for c in listas:
+        it2 = 0
+        if (c[0] == c[-1]):
+            for s in c:
+                if(s=="+"):
+                    cad_valid += "0"
+                else:
+                    cad_valid += "1"
+        else:
+            for s in c:
+                if (s == "+"):
+                    if(listas2[it][it2]==" "):
+                        cad_valid += "2" 
+                    else:
+                        cad_valid += s
+                else:
+                    cad_valid += s
+                it2 += 1 
+        it += 1
+
+    punt = 0
+    diferencias2 = ""
+
+    for line in diferencias.split("\n"):
+        if line.startswith("-") or line.startswith("+"):
+            modified_line = cad_valid[punt] + line[1:]
+            punt += 1
+        else:
+            modified_line = line
+
+        diferencias2 += modified_line + "\n"
+
+    diferencias2 = diferencias2[:-1]
+
+    ind = 0
+    prep = 0
+    aux2 = 0
+
+    fonemas_faltantes = ""
+
+    for linea in diferencias2.split("\n"):
+
+        if linea.startswith("0"):
+            cadena_letras_suma += linea[2]
+
+            if(linea[2]==" "):
+                cadena_letras_resta += " "
+            else:
+                cadena_letras_resta += "#"
+                fonemas_faltantes += linea[2]
+    
+        elif linea.startswith("1"):
+            cadena_letras_resta += linea[2]
+        
+        elif linea.startswith("2"):
+            cadena_letras_suma += linea[2]
+            prep += 1
+
+        elif linea.startswith("+"):
+            cadena_letras_suma += linea[2]
+            if (prep == 1):
+                aux = 1
+            elif(prep>1):
+                aux2 += 1
+                fonemas_faltantes += linea[2]
+
+
+        elif linea.startswith("-"):
+            ind += 1
+
+        else:
+            cadena_letras_suma += linea[2]
+            if (ind == 0):
+                cadena_letras_resta += linea[2]
+            else:
+                if(prep == 0):
+                    for x in range(ind):
+                        cadena_letras_resta += "*"
+                    cadena_letras_resta += linea[2]
+                elif(prep == 1):
+                    if (aux == 0):
+                        for x in range(ind):
+                            cadena_letras_resta += "*"
+                        cadena_letras_resta += " " + linea[2]
+                    else:
+                        cadena_letras_resta += " "
+                        for x in range(ind):
+                            cadena_letras_resta += "*"
+                        cadena_letras_resta += linea[2]
+                else:
+
+                    cadena_letras_resta += " "
+                    for x in range(ind):
+                        cadena_letras_resta += "*"
+
+                    cadena_letras_resta += " "
+
+                    if(aux2 != 0):
+                        for w in range(aux2):
+                            cadena_letras_resta += "#"
+
+                    cadena_letras_resta += linea[2]
+            
+            prep = 0
+            ind = 0
+            aux = 0
+            aux2 = 0
+    
+    if (ind != 0):
+        for x in range(ind):
+            cadena_letras_resta += "*"
+
+
+    return cadena_letras_resta,fonemas_faltantes
+
+def frasesHTML(original,dicho,flag,palabra=None,rec=None):
+    """
+    self-developed phoneme alignment
+    original: reference txt (phoneme,word)
+    dicho: phoneme / word obtained with whisper / allosaurus
+    flag: to spec if its phoneme alig or word align
+    
+    """
+    new,erroneos = textHTML(dicho,original)
+    alineado,faltantes = alin(new,original)
+    
+    if(flag==False):
+       html_linea = """
+       <head>
+         <meta http-equiv="Content-Type" content="text/html"; charset="UTF-8" />
+	   <style type="text/css">
+		.rojo{color: red;font-size: 40 px;}
+                .azul{color: navy;font-size: 40 px;}
+                .verde{color: yellowgreen;font-size: 40 px;}
+                .blanco{color: white;font-size: 40 px;}
+                .duda {color: silver; font-size: 18px;}
+
+	   </style>
+       </head>
+               <br> 
+       """
+       palabras=original.replace("(","").replace(")","").split(" ")
+       html_linea+=""" <a class="blanco">Original: </a>"""
+       for word in palabras:
+           if word!=palabra:
+              html_linea+=""" <a class="blanco"> """+ word + """ </a> """
+           else:
+              if(rec==True):
+                html_linea+=""" <a class="verde">"""+ word + """ </a> """
+              else:
+                html_linea+=""" <a class="rojo">"""+ word + """ </a> """
+          
+    else:
+     html_linea = """
+     <head>
+      <meta http-equiv="Content-Type" content="text/html"; charset="UTF-8" />
+	<style type="text/css">
+		.rojo{color: red;font-size: 40 px;}
+                .azul{color: navy;font-size: 40 px;}
+                .verde{color: yellowgreen;font-size: 40 px;}
+                .blanco{color: white;font-size: 40 px;}
+                .duda {color: silver; font-size: 18px;}
+
+	</style>
+            <br> 
+            <!--
+            <a class="verde">Original2:&nbsp;&nbsp  """+ original + """ </a> 
+            -->
+            <a class="blanco">Original:&nbsp;&nbsp  """+ original + """ </a>
+           <!-- <br><a class="blanco"> Recognized: </a> -->
+    """
+    html_linea+="""<br><a class="blanco"> Recognized: </a>"""
+    fi = 0
+    ei = 0
+    erroneos=str(erroneos)
+    for c in alineado:
+        if (c=="*"):
+            try:
+                html_linea += f'<a class="rojo">{erroneos[ei]}</a>'
+            except:
+                html_linea += f'<a class="duda">{c}</a>'
+            ei += 1
+        elif(c == "#"):
+            if(faltantes[fi]=="/"):
+                html_linea += f'<a class="verde">{faltantes[fi]}</a>'
+            else:
+                html_linea += f'<a class="azul">{faltantes[fi]}</a>'
+            fi += 1
+
+        else:
+            html_linea += f'<a class="verde">{c}</a>'
+
+    return html_linea, alineado
+
+
+def mainn(fileToProc, frase, palabra=None, fonemas=None, fonemaObjetivo=None):
+    """
+    this function uses Allosaurus && Whisper (STP and STT)
+    fileToProc: path to file
+    frase: reference phrase 
+    palabra: in case there is an objetive word
+    fonemas: could be reference phonemes
+    fonemaObjetivo: could be reference phoneme
+    """
+    flag=False
+    args = parse()
+
+    leyenda = """
+    <head>
+      <meta http-equiv="Content-Type" content="text/html"; charset="UTF-8" />
+	<style type="text/css">
+		.rojo{color: red;font-size: 40 px;}
+                .azul{color: navy;font-size: 40 px;}
+                .verde{color: yellowgreen;font-size: 40 px;}
+                .blanco{color: white;font-size: 40 px;}
+                .duda{color: silver; font-size: 18px;}
+
+	</style>
+    <!-- <div class="leyenda"> -->
+   
+          <ul>
+            <li class="verde" id="text1">Caracter correcto</li>
+            <li class="rojo" id="text2">Caracter erroneo</li>
+            <li class="azul" id="text3">Caracter no reconocido</li>
+          </ul>
+    <!-- </div> -->
+"""
+
+    model_name = resolve_model_name(args.model)
+    if model_name == "none":
+        print("Model ", model_name, " does not exist. Please download this model or use an existing model in list_model")
+        exit(0)
+
+    args.model = model_name
+    output_fd = None
+    if args.output != 'stdout':
+        output_fd = open(args.output, 'w', encoding='utf-8')
+
+    args.input=fileToProc
+    conexion = #your db conn
+    print('exito en conexion')
+    flaggg=False
+    try:
+        text_said=" "+getAlternativeText(fileToProc) #your funct using Whisper
+    except Exception:
+        text_said=getTextFromAudio(fileToProc) #another model of your choice in case whisper fails
+
+    if palabra is not None and palabra != "":
+       if palabra.replace(",","") in text_said.replace(".","").replace(",",""):
+          flaggg=True
+          print('SE HA RECONOCIDO LA PALABRA OBJETIVO! ')
+          scorePalabraObjetivo=getScorePalabraObjetivo(palabra, True, True) #your own score based on TRUE detected
+       else:
+          print('No se ha reconocido la palabra objetivo')
+          scorePalabraObjetivo=getScorePalabraObjetivo(palabra, True, False) #your own score, based on NOT detected
+
+   
+    score_palabras = punctWords(text_said[1:].lower(), frase.lower().replace(".","").replace(",","").replace("(","").replace(")",""))
+    alternativo2,fonemas_db, fonemas_dichos_original, fonemas_dichos, puntuacion = scorePhonemes(args,fonemas) #your own phoneme score func based on %
+    res2=score2(fonemas_dichos,fonemas_dichos_original)
+
+
+    puntuaciones=[]
+    puntuaciones.append(float(str(alternativo2).replace('%','')))
+    puntuaciones.append(float(str(res2).replace('%','')))
+    puntuaciones.append(float(str(puntuacion).replace('%',''))) %differente aproaches to get scores
+    punct=max(puntuaciones)
+
+    if fonemaObjetivo is None:
+       if(float(punct) >59.0):
+          try:
+             html_fonemas,alineado_fonemas=frasesHTML(fonemas_db,fonemas_dichos_original,True)
+             html_fonemas2, alineado_fonemas2=frasesHTML(cadena3,fonemas_dichos_original.replace(".",""),True)
+             html_fonemas3, alineado_fonemas3=frasesHTML(cadena3,cadena5,True)
+          except:
+             html_fonemas="No disponible"
+             alineado_fonemas = "No disponible"
+       else:
+          html_fonemas,alineado_fonemas=frasesHTML(fonemas_db,fonemas_dichos_original.replace(".",""),True)
+          alineado_fonemas="No disponible" 
+          html_fonemas2,alineado_fonemas2=frasesHTML(cadena3,fonemas_dichos_original.replace(".",""),True)
+          alineado_fonemas2="No disponible"
+          html_fonemas3="No disponible"
+
+
+
+
+    print(score_palabras)
+    sc=score_palabras.split('%')[0]
+    
+    if fonemaObjetivo is None:
+       if (float(sc) > 50):
+          frase=frase.replace(",","").replace("(","").replace(")","").replace("?","").replace("'","").replace("?","").replace("!","").replace("‘","").replace("“","").replace(".","").replace("”","").replace('"','').replace("’","").replace("-","")
+          text_said=text_said.replace(",","").replace("?","").replace("'","").replace("?","").replace("!","").replace("‘","").replace("“","").replace(".","").replace("”","").replace('"','').replace("’","").replace("-","")
+          try:
+              html_words,alineado_words=frasesHTML(frase.lower().replace(".",""),text_said[1:].lower().replace(".",""),False,palabra,flaggg)
+              html_words_sil, alineado_words_sil=frasesHTML(cadena2.lower(),cadena.lower(),False)
+          except:
+              html_words ="No disponible"
+              alineado_words="No disponible"
+       else:
+          html_words="No disponible"
+          alineado_words="No disponible" 
+          html_words_sil="No disponible" 
+          alineado_words_sil="No disponible"
+
+    if fonemaObjetivo is None:
+       return scorePalabraObjetivo, html_words, html_fonemas, alternativo2, res2, score_palabras, fonemas_db, fonemas_dichos_original, puntuacion, leyenda
+    else:
+       fonemaObjetivo=fonemaObjetivo.replace("/","")
+       num_rec = fonemas_dichos_original.lower().count(fonemaObjetivo.lower())
+       num_total = fonemas.lower().count(fonemaObjetivo.lower())
+       try:
+          scoreFonemasObjetivo = format (100*(num_rec/num_total),'.2f')
+       except:
+          scoreFonemasObjetivo = 0
+       puntuacion, html_words=getHTMLSR02(frase.lower().replace(".","").replace("!",""),text_said[1:].lower().replace(".",""))
+       return puntuacion, html_words, num_rec, num_total, scoreFonemasObjetivo, leyenda
+ 
